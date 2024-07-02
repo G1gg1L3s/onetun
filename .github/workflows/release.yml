@@ -2,37 +2,8 @@ name: release
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - "v[0-9]+.[0-9]+.[0-9]+"
 jobs:
-  docker-push:
-    name: docker-push
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v2
-        with:
-          fetch-depth: 1
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@98669ae865ea3cffbcbaa878cf57c20bbf1c6c38
-        with:
-          images: aramperes/onetun
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@ad44023a93711e3deb337508980b4b5e9bcdc5dc
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
   create-release:
     name: create-release
     runs-on: ubuntu-latest
@@ -68,27 +39,17 @@ jobs:
 
   build-release:
     name: build-release
-    needs: [ 'create-release' ]
-    runs-on: ${{ matrix.os }}
+    needs: ["create-release"]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
     env:
       # Emit backtraces on panics.
       RUST_BACKTRACE: 1
-    strategy:
-      matrix:
-        build: [ linux-amd64, macos-intel, windows ]
-        include:
-          - build: linux-amd64
-            os: ubuntu-latest
-            rust: stable
-            target: x86_64-unknown-linux-musl
-          - build: macos-intel
-            os: macos-latest
-            rust: stable
-            target: x86_64-apple-darwin
-          - build: windows
-            os: windows-2019
-            rust: stable
-            target: x86_64-pc-windows-msvc
 
     steps:
       - name: Checkout repository
@@ -96,56 +57,33 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Install packages (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          .github/ci/ubuntu-install-packages
-      - name: Install packages (macOS)
-        if: matrix.os == 'macos-latest'
-        run: |
-          .github/ci/macos-install-packages
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: ${{ matrix.rust }}
           profile: minimal
+          toolchain: stable
           override: true
-          target: ${{ matrix.target }}
 
-      - name: Get release download URL
-        uses: actions/download-artifact@v1
-        with:
-          name: artifacts
-          path: artifacts
+      - name: Install cross
+        run: cargo install cross
 
-      - name: Set release upload URL
-        shell: bash
+      - name: Build Target
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Package Binary
         run: |
-          release_upload_url="$(cat artifacts/release-upload-url)"
-          echo "RELEASE_UPLOAD_URL=$release_upload_url" >> $GITHUB_ENV
-          echo "release upload url: $release_upload_url"
+          mkdir -p release
+          cp target/${{ matrix.target }}/release/onetun release/
+          cd release
+          tar czf ${{ matrix.target }}.tar.gz onetun
+          cd ..
 
-      - name: Build onetun binary
-        run: cargo build --release
-
-      - name: Prepare onetun binary
-        shell: bash
-        run: |
-          mkdir -p ci/assets
-          if [ "${{ matrix.build }}" = "windows" ]; then
-            cp "target/release/onetun.exe" "ci/assets/onetun.exe"
-            echo "ASSET=onetun.exe" >> $GITHUB_ENV
-          else
-            cp "target/release/onetun" "ci/assets/onetun-${{ matrix.build }}"
-            echo "ASSET=onetun-${{ matrix.build }}" >> $GITHUB_ENV
-          fi
-
-      - name: Upload release archive
-        uses: actions/upload-release-asset@v1.0.1
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          upload_url: ${{ env.RELEASE_UPLOAD_URL }}
-          asset_path: ci/assets/${{ env.ASSET }}
-          asset_name: ${{ env.ASSET }}
-          asset_content_type: application/octet-stream
+          upload_url: ${{ needs.release.outputs.upload_url }}
+          asset_path: ./release/${{ matrix.target }}.tar.gz
+          asset_name: onetun-${{ matrix.target }}.tar.gz
+          asset_content_type: application/gzip
